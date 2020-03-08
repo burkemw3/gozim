@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -245,8 +246,12 @@ func (z *ZimReader) readFileHeaders() error {
 
 	// checking for version
 	v, err = readInt32(z.bytesRangeAt(4, 4+4))
-	if err != nil || v != 5 {
-		return errors.New("unsupported version, 5 only")
+	if err != nil {
+		return err
+	}
+	if v != 5 && v != 6 {
+		return errors.New("unsupported version, 5 & 6 supported, file uses " +
+			strconv.FormatUint(uint64(v), 10))
 	}
 
 	// checking for articles count

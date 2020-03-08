@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"io/ioutil"
 	"strings"
+	"strconv"
 	"sync"
 
 	"github.com/hashicorp/golang-lru"
@@ -31,7 +33,7 @@ type Article struct {
 	URLPtr    uint64
 	Namespace byte
 	url       string
-	blob      uint32
+	blob      uint64
 	cluster   uint32
 	z         *ZimReader
 }
@@ -94,10 +96,11 @@ func (z *ZimReader) FillArticleAt(a *Article, offset uint64) error {
 	if err != nil {
 		return err
 	}
-	a.blob, err = readInt32(z.bytesRangeAt(offset+12, offset+12+4))
+	blob32, err := readInt32(z.bytesRangeAt(offset+12, offset+12+4))
 	if err != nil {
 		return err
 	}
+	a.blob = uint64(blob32)
 
 	// Redirect
 	if mimeIdx == RedirectEntry {
@@ -146,6 +149,21 @@ func (z *ZimReader) FillArticleAt(a *Article, offset uint64) error {
 	return nil
 }
 
+func readExtensionCheck(b []byte, err error, extended uint8) (uint64, error) {
+	if extended == 0 {
+		v32, aerr := readInt32(b, err)
+		v := uint64(v32)
+		return v, aerr
+	} else if extended == 1 {
+		v, aerr := readInt64(b, err)
+		return v, aerr
+	} else {
+		v := uint64(0)
+		aerr := errors.New("unknown extended value")
+		return v, aerr
+	}
+}
+
 // return the uncompressed data associated with this article
 func (a *Article) Data() ([]byte, error) {
 	// ensure we have data to read
@@ -160,10 +178,22 @@ func (a *Article) Data() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	compression := uint8(s[0])
+	clusterInfo := uint8(s[0])
+	compression := clusterInfo & 0x0F
+	extended := clusterInfo & 0x10
 
-	// blob starts at offset, blob ends at offset
-	var bs, be uint32
+	// blob starts at offset, blob ends at offset, offset size
+	var bs, be, os uint64
+
+	if extended == 0 {
+		os = 4
+	} else if extended == 1 {
+		os = 8
+		log.Printf("extended: %s", a.Title);
+	} else {
+		return nil, errors.New("unknown cluster extension flag: " +
+			strconv.FormatUint(os, 10))
+	}
 
 	// LZMA
 	if compression == 4 {
@@ -206,11 +236,11 @@ func (a *Article) Data() ([]byte, error) {
 			blob = bi.([]byte)
 		}
 
-		bs, err = readInt32(blob[a.blob*4:a.blob*4+4], nil)
+		bs, err = readExtensionCheck(blob[a.blob*os:a.blob*os+os], nil, extended)
 		if err != nil {
 			return nil, err
 		}
-		be, err = readInt32(blob[a.blob*4+4:a.blob*4+4+4], nil)
+		be, err = readExtensionCheck(blob[a.blob*os+os:a.blob*os+os+os], nil, extended)
 		if err != nil {
 			return nil, err
 		}
@@ -223,14 +253,16 @@ func (a *Article) Data() ([]byte, error) {
 	} else if compression == 0 || compression == 1 {
 		// un compresssed
 		startPos := start + 1
-		blobOffset := uint64(a.blob * 4)
+		blobOffset := a.blob * os
 
-		bs, err := readInt32(a.z.bytesRangeAt(startPos+blobOffset, startPos+blobOffset+4))
+		b, aerr := a.z.bytesRangeAt(startPos+blobOffset, startPos+blobOffset+os)
+		bs, err := readExtensionCheck(b, aerr, extended)
 		if err != nil {
 			return nil, err
 		}
 
-		be, err := readInt32(a.z.bytesRangeAt(startPos+blobOffset+4, startPos+blobOffset+4+4))
+		b, aerr = a.z.bytesRangeAt(startPos+blobOffset+os, startPos+blobOffset+os+os)
+		be, err := readExtensionCheck(b, aerr, extended)
 		if err != nil {
 			return nil, err
 		}
@@ -271,12 +303,12 @@ func (a *Article) RedirectIndex() (uint32, error) {
 
 func (a *Article) blobOffsetsAtIdx(z *ZimReader) (start, end uint64) {
 	idx := a.blob
-	offset := z.clusterPtrPos + uint64(idx)*8
+	offset := z.clusterPtrPos + idx*8
 	start, err := readInt64(z.bytesRangeAt(offset, offset+8))
 	if err != nil {
 		return
 	}
-	offset = z.clusterPtrPos + uint64(idx+1)*8
+	offset = z.clusterPtrPos + (idx+1)*8
 	end, err = readInt64(z.bytesRangeAt(offset, offset+8))
 
 	return
